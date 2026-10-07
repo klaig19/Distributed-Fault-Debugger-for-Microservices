@@ -1,0 +1,17 @@
+{
+  "name": "@chronoscope/event-ingestor",
+  "version": "1.0.0",
+  "description": "Event Ingestor — Consumes ALL events from Kafka and persists them to PostgreSQL Event Store. Enables queryable event storage for debugging, replay, and timeline reconstruction.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "pg": "^8.12.0",
+    "@chronoscope/core": "file:../core"
+  }
+}

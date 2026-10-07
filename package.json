@@ -1,0 +1,41 @@
+{
+  "name": "chronoscope",
+  "version": "1.0.0",
+  "description": "A Kafka-based event-sourced debugging system that allows deterministic replay of distributed workflows, reducing debugging time by reconstructing exact system state from event history.",
+  "private": true,
+  "workspaces": [
+    "core",
+    "services/order-service",
+    "services/payment-service",
+    "event-ingestor",
+    "replay-engine",
+    "debug-api"
+  ],
+  "scripts": {
+    "setup:infra": "docker-compose up -d && node scripts/init-db.js && node scripts/init-kafka.js",
+    "seed": "node scripts/seed-events.js",
+    "clear": "node scripts/clear-db.js",
+    "dev": "concurrently --kill-others --prefix \"[{name}]\" --names \"ORDER,PAYMENT,INGEST,REPLAY,DEBUG\" --prefix-colors \"blue,magenta,cyan,orange,green\" \"npm start --workspace=@chronoscope/order-service\" \"npm start --workspace=@chronoscope/payment-service\" \"npm start --workspace=@chronoscope/event-ingestor\" \"npm start --workspace=@chronoscope/replay-engine\" \"npm start --workspace=@chronoscope/debug-api\"",
+    "stop": "docker-compose down",
+    "start:all": "node scripts/start.js",
+    "stop:all": "docker compose down",
+    "restart:all": "docker compose down && node scripts/start.js --no-seed",
+    "health": "node scripts/healthcheck.js",
+    "logs": "docker compose logs -f",
+    "test": "npm run test --workspaces"
+  },
+  "keywords": [
+    "kafka",
+    "event-sourcing",
+    "replay-engine",
+    "microservices",
+    "debugging",
+    "distributed-systems"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "npm-run-all": "^4.1.5"
+  }
+}

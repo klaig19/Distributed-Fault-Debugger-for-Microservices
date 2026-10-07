@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.idea/
+.vscode/
+# Ignore all markdown docs except README (keep private, not pushed)
+*.md
+!README.md
+docs/

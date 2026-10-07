@@ -1,0 +1,17 @@
+{
+  "name": "@chronoscope/order-service",
+  "version": "1.0.0",
+  "description": "Order Service — Handles order creation, updates, and cancellation. Emits structured events to Kafka for downstream processing and replay.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "pg": "^8.12.0",
+    "@chronoscope/core": "file:../../core"
+  }
+}

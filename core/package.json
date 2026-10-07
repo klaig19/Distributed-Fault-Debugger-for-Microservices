@@ -1,0 +1,15 @@
+{
+  "name": "@chronoscope/core",
+  "version": "1.0.0",
+  "description": "Shared core utilities for the Chronoscope — event schemas, Kafka producer/consumer, correlation middleware, and structured logging.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "kafkajs": "^2.2.4",
+    "uuid": "^9.0.0",
+    "winston": "^3.11.0"
+  }
+}

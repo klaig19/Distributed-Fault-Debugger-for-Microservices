@@ -1,0 +1,353 @@
+# =============================================================================
+# CHRONOSCOPE — Docker Compose Infrastructure
+# =============================================================================
+# This file orchestrates ALL infrastructure dependencies for the replay engine:
+#   1. Zookeeper  — Kafka coordination (required by Kafka in non-KRaft mode)
+#   2. Kafka      — Event streaming backbone (ordered, durable, replayable log)
+#   3. PostgreSQL — Event Store (queryable persistence for debugging/replay)
+#   4. Redis      — Idempotency cache (prevents duplicate event processing)
+#
+# WHY THESE CHOICES:
+#   - Kafka provides ordering guarantees within partitions (critical for replay)
+#   - PostgreSQL's JSONB enables flexible event payload querying
+#   - Redis gives O(1) idempotency checks during replay
+#
+# USAGE:
+#   docker-compose up -d          → Start all infrastructure
+#   docker-compose down -v        → Tear down + remove volumes
+#   docker-compose logs -f kafka  → Tail Kafka logs
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # ZOOKEEPER — Kafka Coordination Service
+  # ===========================================================================
+  # Zookeeper manages Kafka broker metadata, leader election, and cluster state.
+  # In production, you'd use KRaft mode (Kafka without Zookeeper), but for
+  # development/learning, the traditional Zookeeper setup is more straightforward.
+  # ===========================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: chronoscope-zookeeper
+    ports:
+      - "2181:2181"                    # ZK client port
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181      # Port for Kafka to connect
+      ZOOKEEPER_TICK_TIME: 2000        # Base time unit in ms for heartbeats
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    networks:
+      - replay-network
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # KAFKA — Event Streaming Backbone
+  # ===========================================================================
+  # Kafka is the SINGLE SOURCE OF TRUTH for all events in the system.
+  #
+  # KEY GUARANTEES:
+  #   - Ordering within partitions (we partition by correlation_id)
+  #   - Durability (events survive broker restarts)
+  #   - Replayability (consumers can seek to any offset)
+  #
+ 
+  #
+  # TOPICS CREATED:
+  #   - orders-events    → Order lifecycle events (CREATED, UPDATED, CANCELLED)
+  #   - payments-events  → Payment lifecycle events (INITIATED, SUCCESS, FAILED)
+  #   - system-events    → Cross-cutting events (REPLAY_STARTED, REPLAY_COMPLETED)
+  # ===========================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: chronoscope-kafka
+    depends_on:
+      zookeeper:
+        condition: service_started
+    ports:
+      - "9092:9092"                    # External listener (for host services)
+      - "29092:29092"                  # Internal listener (for Docker network)
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # -------------------------------------------------------------------
+      # LISTENER CONFIGURATION (Critical for Docker networking)
+      # -------------------------------------------------------------------
+      # Two listeners are needed:
+      #   PLAINTEXT  → Used by services INSIDE Docker network
+      #   HOST       → Used by services running on HOST machine (dev mode)
+      # -------------------------------------------------------------------
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # -------------------------------------------------------------------
+      # TOPIC DEFAULTS
+      # -------------------------------------------------------------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1        # Single broker setup
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"         # Explicit topic creation
+      KAFKA_NUM_PARTITIONS: 3                          # Default partitions
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      # -------------------------------------------------------------------
+      # LOG RETENTION (Keep events for replay)
+      # -------------------------------------------------------------------
+      KAFKA_LOG_RETENTION_HOURS: 168                   # 7 days retention
+      KAFKA_LOG_RETENTION_BYTES: 1073741824            # 1GB max per partition
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - replay-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ===========================================================================
+  # KAFKA TOPIC INITIALIZATION
+  # ===========================================================================
+  # Creates our event topics with specific partition counts.
+  #
+  # PARTITIONING STRATEGY:
+  #   - We use correlation_id as the partition key
+  #   - This ensures ALL events for a single request flow land in the SAME
+  #     partition, preserving ordering for replay
+  #   - 3 partitions allows parallel processing while maintaining per-flow order
+
+  # ===========================================================================
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: chronoscope-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo '======================================='
+      echo 'Creating Kafka Topics...'
+      echo '======================================='
+
+      # One invocation per line — backslash line-continuations do not survive
+      # this YAML block scalar reliably, so keep each command on a single line.
+      # orders-events / payments-events: 3 partitions (parallel, per-flow order).
+      # system-events: 1 partition (low volume, strict global order).
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic orders-events --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic payments-events --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --topic system-events --partitions 1 --replication-factor 1 --config retention.ms=604800000
+
+      echo '======================================='
+      echo 'Topics created successfully!'
+      echo '======================================='
+      kafka-topics --list --bootstrap-server kafka:29092
+      "
+    networks:
+      - replay-network
+
+  # ===========================================================================
+  # POSTGRESQL — Event Store Database
+  # ===========================================================================
+  # PostgreSQL serves as the QUERYABLE EVENT STORE.
+  #
+  # WHY NOT JUST USE KAFKA?
+  #   - Kafka is great for streaming but terrible for ad-hoc queries
+  #   - You can't efficiently query "show me all events for correlation_id X"
+  #   - PostgreSQL with JSONB gives us:
+  #     → Rich querying (filter by service, event type, time range)
+  #     → Timeline reconstruction (ORDER BY timestamp)
+  #     → Aggregations (events per service, failure rates)
+  #
+  # The event-ingestor service consumes from Kafka and writes to this DB.
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: chronoscope-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: replay_user
+      POSTGRES_PASSWORD: replay_pass
+      POSTGRES_DB: chronoscope
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Mount init script to auto-create tables on first startup
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - replay-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replay_user -d chronoscope"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # DB GUI — Web-Based Database Management (Adminer)
+  # ===========================================================================
+  # A lightweight web GUI for PostgreSQL.
+  # Access at: http://localhost:8080
+  # Login: System -> PostgreSQL, Server -> postgres, User -> replay_user, Pass -> replay_pass
+  # ===========================================================================
+  adminer:
+    image: adminer
+    container_name: chronoscope-db-gui
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - replay-network
+
+  # ===========================================================================
+  # REDIS — Idempotency Cache
+  # ===========================================================================
+  # Redis provides O(1) lookups for idempotency checking during replay.
+  #
+  # WHY REDIS FOR IDEMPOTENCY?
+  #   - Replay can re-process thousands of events per second
+  #   - Each event needs an "already processed?" check
+  #   - PostgreSQL would bottleneck at ~1000 qps for this pattern
+  #   - Redis handles 100k+ ops/sec with sub-millisecond latency
+  #
+  # STRATEGY:
+  #   - Key:   "processed:{event_id}"
+  #   - Value: timestamp of processing
+  #   - TTL:   24 hours (cleanup old entries)
+  #
+ 
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: chronoscope-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - replay-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # APPLICATION SERVICES (the five Node microservices)
+  # ===========================================================================
+  # All five run from the SAME image (built once from ./Dockerfile) and differ
+  # only by their launch command and port. The `&app-env` anchor below holds the
+  # shared environment so we don't repeat ourselves.
+  #
+  # Inside this network the infra hostnames are: kafka:29092, postgres, redis.
+  # ===========================================================================
+  order-service:
+    build: .
+    image: chronoscope-app
+    container_name: chronoscope-order-service
+    depends_on:
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    environment: &app-env
+      NODE_ENV: production
+      LOG_LEVEL: info
+      KAFKA_BROKER: kafka:29092
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: chronoscope
+      DB_USER: replay_user
+      DB_PASSWORD: replay_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REPLAY_ENGINE_URL: http://replay-engine:3004
+    command: ["node", "services/order-service/src/index.js"]
+    ports:
+      - "3001:3001"
+    networks:
+      - replay-network
+    restart: unless-stopped
+
+  payment-service:
+    image: chronoscope-app
+    container_name: chronoscope-payment-service
+    depends_on:
+      kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    environment: *app-env
+    command: ["node", "services/payment-service/src/index.js"]
+    ports:
+      - "3002:3002"
+    networks:
+      - replay-network
+    restart: unless-stopped
+
+  event-ingestor:
+    image: chronoscope-app
+    container_name: chronoscope-event-ingestor
+    depends_on:
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    environment: *app-env
+    command: ["node", "event-ingestor/src/index.js"]
+    ports:
+      - "3003:3003"
+    networks:
+      - replay-network
+    restart: unless-stopped
+
+  replay-engine:
+    image: chronoscope-app
+    container_name: chronoscope-replay-engine
+    depends_on:
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    environment: *app-env
+    command: ["node", "replay-engine/src/index.js"]
+    ports:
+      - "3004:3004"
+    networks:
+      - replay-network
+    restart: unless-stopped
+
+  debug-api:
+    image: chronoscope-app
+    container_name: chronoscope-debug-api
+    depends_on:
+      postgres: { condition: service_healthy }
+      replay-engine: { condition: service_started }
+    environment: *app-env
+    command: ["node", "debug-api/src/index.js"]
+    ports:
+      - "3005:3005"                    # Debug UI + REST API → http://localhost:3005
+    networks:
+      - replay-network
+    restart: unless-stopped
+
+# =============================================================================
+# PERSISTENT VOLUMES
+# =============================================================================
+# Named volumes ensure data survives container restarts.
+# Use `docker-compose down -v` to reset all data for clean testing.
+# =============================================================================
+volumes:
+  zookeeper-data:
+  zookeeper-log:
+  kafka-data:
+  postgres-data:
+  redis-data:
+
+# =============================================================================
+# NETWORK
+# =============================================================================
+# All services share a single bridge network for inter-service communication.
+# Service names (kafka, postgres, redis) act as DNS hostnames within this network.
+# =============================================================================
+networks:
+  replay-network:
+    driver: bridge

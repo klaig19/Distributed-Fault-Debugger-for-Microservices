@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chronoscope</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="app-header">
+        <h1>Chronoscope - Debug UI</h1>
+    </header>
+
+    <main class="container">
+        <section id="dashboard-controls" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <div id="stats-section" class="stats-grid" style="margin-bottom: 0;">
+                <!-- Populated via JS -->
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button id="create-order-btn" class="btn primary" style="padding: 10px 20px; font-size: 1.1em; background-color: #48bb78; border-color: #38a169;">Create Valid Order</button>
+                <button id="create-fail-order-btn" class="btn danger" style="padding: 10px 20px; font-size: 1.1em; background-color: #e53e3e; border-color: #c53030;">Create Failing Order</button>
+            </div>
+        </section>
+
+        <!-- Request Flows List -->
+        <section id="flows-section">
+            <h2>Request Flows</h2>
+            <div id="flows-list" class="flows-list">
+                Loading flows...
+            </div>
+        </section>
+
+        <!-- Timeline Detail View (Hidden by default) -->
+        <section id="timeline-section" style="display: none;">
+            <button id="back-btn" class="btn">← Back to Flows</button>
+            <h2 id="timeline-title">Event Timeline</h2>
+            
+            <div id="timeline-container" class="timeline">
+                <!-- Populated via JS -->
+            </div>
+
+            <!-- Replay Controls -->
+            <div class="replay-controls">
+                <h3>Replay Session</h3>
+                <div class="replay-buttons">
+                    <button id="dry-run-btn" class="btn primary">Start Dry Run</button>
+                    <button id="state-rebuild-btn" class="btn danger">Start State Rebuild</button>
+                </div>
+                <div id="replay-results" class="replay-results mt-15">
+                    <!-- Populated via JS -->
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
